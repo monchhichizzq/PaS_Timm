@@ -15,7 +15,7 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 Hacked together by / Copyright 2020 Ross Wightman (https://github.com/rwightman)
 """
 import os 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import argparse
 import copy
@@ -67,6 +67,9 @@ except ImportError as e:
 
 
 from core_sparse.rebuild_net import insert_pas_modules 
+from core_sparse.metrics.compute_metric_v2 import measure_network_compute, create_layer_metric_dict
+from core_sparse.prune.utils import Convergence
+from core_sparse.losses.pas_loss import apply_opt_loss, apply_pas_loss
 
 has_compile = hasattr(torch, 'compile')
 
@@ -82,12 +85,22 @@ parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
                     help='YAML config file specifying default arguments')
 
 # basic
-img_size = 160
+img_size = 160 # 160
 img_size_eval = 224
+batch_size = 128
 net_arch = "resnet50"
 model_path = "/home/zzq/Documents/apps/image_cls/pytorch-image-models/trained_models/resnet50_A3/20250423-063501-resnet50-160/model_best.pth.tar"
-save_dir = "save_dir/resnet50_A3"
 
+search_lr = 5e-4 # 5e-3 # 0.008
+prune_ratio = 0.55
+warmup_epochs = 0
+epochs = 50
+pas_record = True
+freeze_binary = False
+
+# 0.008: 5e-5
+
+save_dir = f"save_dir/resnet50_A3_search_lr_{search_lr}_eps_{epochs}_bs_{batch_size}_p{prune_ratio}_scale_1e3_fp32"
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 
@@ -133,7 +146,7 @@ group.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
                    help='Load this checkpoint into model after initialization (default: none)')
 group.add_argument('--resume', default=model_path, type=str, metavar='PATH',
                    help='Resume full model and optimizer state from checkpoint (default: none)')
-group.add_argument('--no-resume-opt', action='store_true', default=False,
+group.add_argument('--no-resume-opt', action='store_true', default=True, # important
                    help='prevent resume of optimizer state when resuming model')
 group.add_argument('--num-classes', type=int, default=None, metavar='N',
                    help='number of label classes (Model default if None)')
@@ -155,7 +168,7 @@ group.add_argument('--std', type=float, nargs='+', default=None, metavar='STD',
                    help='Override std deviation of dataset')
 group.add_argument('--interpolation', default='', type=str, metavar='NAME',
                    help='Image resize interpolation type (overrides model)')
-group.add_argument('-b', '--batch-size', type=int, default=256, metavar='N',
+group.add_argument('-b', '--batch-size', type=int, default=batch_size, metavar='N',
                    help='Input batch size for training (default: 128)')
 group.add_argument('-vb', '--validation-batch-size', type=int, default=None, metavar='N',
                    help='Validation batch size override (default: None)')
@@ -232,7 +245,7 @@ group.add_argument('--sched-on-updates', action='store_true', default=False,
                    help='Apply LR scheduler step on update instead of epoch end.')
 group.add_argument('--lr', type=float, default=None, metavar='LR',
                    help='learning rate, overrides lr-base if set (default: None)')
-group.add_argument('--lr-base', type=float, default=0.008, metavar='LR',
+group.add_argument('--lr-base', type=float, default=search_lr, metavar='LR',
                    help='base learning rate: lr = lr_base * global_batch_size / base_size')
 group.add_argument('--lr-base-size', type=int, default=2048, metavar='DIV',
                    help='base learning rate batch size (divisor, default: 256).')
@@ -256,17 +269,17 @@ group.add_argument('--warmup-lr', type=float, default=1e-4, metavar='LR', #TODO
                    help='warmup learning rate (default: 1e-5)')
 group.add_argument('--min-lr', type=float, default=1e-6, metavar='LR',
                    help='lower lr bound for cyclic schedulers that hit 0 (default: 0)')
-group.add_argument('--epochs', type=int, default=100, metavar='N',
+group.add_argument('--epochs', type=int, default=epochs, metavar='N',
                    help='number of epochs to train (default: 300)')
 group.add_argument('--epoch-repeats', type=float, default=0., metavar='N',
                    help='epoch repeat multiplier (number of times to repeat dataset epoch per train epoch).')
-group.add_argument('--start-epoch', default=None, type=int, metavar='N',
+group.add_argument('--start-epoch', default=0, type=int, metavar='N',
                    help='manual epoch number (useful on restarts)')
 group.add_argument('--decay-milestones', default=[90, 180, 270], type=int, nargs='+', metavar="MILESTONES",
                    help='list of decay epoch indices for multistep lr. must be increasing')
 group.add_argument('--decay-epochs', type=float, default=100, metavar='N',
                    help='epoch interval to decay LR')
-group.add_argument('--warmup-epochs', type=int, default=5, metavar='N',
+group.add_argument('--warmup-epochs', type=int, default=warmup_epochs, metavar='N',
                    help='epochs to warmup LR, if scheduler supports')
 group.add_argument('--warmup-prefix', action='store_true', default=False,
                    help='Exclude warmup period from decay schedule.'),
@@ -413,6 +426,8 @@ group.add_argument('--wandb-tags', default=[], type=str, nargs='+',
 group.add_argument('--wandb-resume-id', default='', type=str, metavar='ID',
                    help='If resuming a run, the id of the run in wandb')
 
+group.add_argument('--eval', action='store_true', default=False)
+group.add_argument('--insert_pas', action='store_true', default=False)
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -520,6 +535,14 @@ def main():
     if args.head_init_bias is not None:
         nn.init.constant_(model.get_classifier().bias, args.head_init_bias)
 
+    # Important: add trainable parameters before building optimizer!!
+    if args.insert_pas:
+        insert_pas_modules(model, inplace=False)
+        model.cuda()
+        model.eval()
+        tensor = torch.rand(8, 3, img_size_eval, img_size_eval).cuda()
+        out = model(tensor)
+
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
@@ -620,13 +643,17 @@ def main():
     # optionally resume from a checkpoint
     resume_epoch = None
     if args.resume:
-        resume_epoch = resume_checkpoint(
-            model,
-            args.resume,
-            optimizer=None if args.no_resume_opt else optimizer,
-            loss_scaler=None if args.no_resume_opt else loss_scaler,
-            log_info=utils.is_primary(args),
-        )
+        # resume_epoch = resume_checkpoint(
+        #     model,
+        #     args.resume,
+        #     optimizer=None if args.no_resume_opt else optimizer,
+        #     loss_scaler=None if args.no_resume_opt else loss_scaler,
+        #     log_info=utils.is_primary(args),
+        # )
+        # Load checkpoint
+        checkpoint = torch.load(args.resume, weights_only=False, map_location='cpu')
+        print(checkpoint.keys())
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
 
     # setup exponential moving average of model weights, SWA could be used here too
     model_ema = None
@@ -880,8 +907,9 @@ def main():
     if args.start_epoch is not None:
         # a specified start_epoch will always override the resume epoch
         start_epoch = args.start_epoch
-    elif resume_epoch is not None:
-        start_epoch = resume_epoch
+    # elif resume_epoch is not None:
+    #     start_epoch = resume_epoch
+
     if lr_scheduler is not None and start_epoch > 0:
         if args.sched_on_updates:
             lr_scheduler.step_update(start_epoch * updates_per_epoch)
@@ -897,15 +925,51 @@ def main():
             f'Scheduled epochs: {num_epochs} {sched_explain}. '
             f'LR stepped per {"epoch" if lr_scheduler.t_in_epochs else "update"}.')
 
+    ### act sparsity ###
+    if args.insert_pas:
+        # insert_pas_modules(model, inplace=False)
+        # model.cuda()
+        # model.eval()
+        # tensor = torch.rand(8, 3, img_size_eval, img_size_eval).cuda()
+        # out = model(tensor)
+        # print("out:", out.shape)
+
+        avg_metric_dit = create_layer_metric_dict(model)
+        print("avg_metric_dit:", avg_metric_dit.keys())
+        xlsx_file_path = "profile.xlsx"
+        measure_network_compute(model, arch="fuse", avg_metric_dit=avg_metric_dit, xlsx_file_path=xlsx_file_path, verbose=True)
+
+        ####### freeze binary dw weights #######
+        if freeze_binary:
+            for name, params in model.named_parameters():
+                if 'scale' in name:
+                    params.requires_grad = False
+                    print('epoch and freezed params: ', name)
+
+        if pas_record:
+            converge = Convergence(model)
+        else:
+            converge = None
+
+
+    print("Evaluation")
     eval_metrics = validate(
-                    model,
-                    loader_eval,
-                    validate_loss_fn,
-                    args,
-                    device=device,
-                    amp_autocast=amp_autocast,
-                    model_dtype=model_dtype,
-                )
+                model,
+                loader_eval,
+                validate_loss_fn,
+                args,
+                device=device,
+                amp_autocast=amp_autocast,
+                model_dtype=model_dtype,
+            )
+    print("eval_metrics:", eval_metrics)
+    
+    ### act sparsity ###
+    if args.insert_pas:
+        measure_network_compute(model, arch="fuse", avg_metric_dit=avg_metric_dit, xlsx_file_path=xlsx_file_path, verbose=True)
+
+    if args.eval:
+        return
 
     results = []
     try:
@@ -931,6 +995,7 @@ def main():
                 model_ema=model_ema,
                 mixup_fn=mixup_fn,
                 num_updates_total=num_epochs * updates_per_epoch,
+                converge=converge
             )
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
@@ -999,6 +1064,12 @@ def main():
                 latest_results['validation'] = eval_metrics
             results.append(latest_results)
 
+            # os.makedirs(output_dir, exist_ok=True)
+            pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+            converge_path = os.path.join(output_dir, f"convergence_{args.prune}_pmacs_{prune_macs}_tmacs_{target_macs}.pt")
+            converge.save(converge_path)
+            print(f"converge_path: {converge_path}")
+
     except KeyboardInterrupt:
         pass
 
@@ -1033,6 +1104,7 @@ def train_one_epoch(
         model_ema=None,
         mixup_fn=None,
         num_updates_total=None,
+        converge=None
 ):
     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
         if args.prefetcher and loader.mixup_enabled:
@@ -1045,6 +1117,7 @@ def train_one_epoch(
     update_time_m = utils.AverageMeter()
     data_time_m = utils.AverageMeter()
     losses_m = utils.AverageMeter()
+    tlosses_m = utils.AverageMeter()
 
     model.train()
 
@@ -1107,13 +1180,26 @@ def train_one_epoch(
 
         if has_no_sync and not need_update:
             with model.no_sync():
-                loss = _forward()
+                task_loss = _forward()
+                #### pas_change
+                # apply_opt_loss(model, star_coeff=0, pas_coeff=0, loss_mode="l1")
+                pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+                loss = task_loss + pas_loss
                 _backward(loss)
         else:
-            loss = _forward()
+            task_loss = _forward()
+            pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+            loss = task_loss + pas_loss
             _backward(loss)
 
+        #### pas_change
+        if converge is not None:
+            converge.update(model)
+
+        # loss = task_loss
+
         losses_m.update(loss.item() * accum_steps, input.size(0))
+        # tlosses_m.update(task_loss.item() * accum_steps, input.size(0))
         update_sample_count += input.size(0)
 
         if not need_update:
@@ -1155,6 +1241,10 @@ def train_one_epoch(
                     f'LR: {lr:.3e}  '
                     f'Data: {data_time_m.val:.3f} ({data_time_m.avg:.3f})'
                 )
+
+                print("total macs: {:.3f}G, pruned macs: {:.3f}G, target macs: {:.3f}G, pas_loss: {:.3f}, task_loss: {:.3f}".format(
+                    dense_macs, prune_macs, target_macs, pas_loss, task_loss
+                ))
 
                 if args.save_images and output_dir:
                     torchvision.utils.save_image(
@@ -1228,6 +1318,7 @@ def validate(
                 loss = loss_fn(output, target)
             acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
 
+
             if args.distributed:
                 reduced_loss = utils.reduce_tensor(loss.data, args.world_size)
                 acc1 = utils.reduce_tensor(acc1, args.world_size)
@@ -1255,6 +1346,10 @@ def validate(
                     f'Acc@1: {top1_m.val:>7.3f} ({top1_m.avg:>7.3f})  '
                     f'Acc@5: {top5_m.val:>7.3f} ({top5_m.avg:>7.3f})'
                 )
+                pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+                print("total macs: {:.3f}G, pruned macs: {:.3f}G, target macs: {:.3f}G, pas_loss: {:.3f}".format(
+                    dense_macs, prune_macs, target_macs, pas_loss
+                ))
 
     metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
     print("eval input size:", input.shape)
