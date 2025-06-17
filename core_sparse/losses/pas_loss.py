@@ -138,8 +138,6 @@ def apply_pas_loss(model, prune_ratio=0.0, pas_coeff=5, arch="resnets"):
         for name, module in model.named_modules():
             if isinstance(module, BinaryConv2d):
                 w = module.weight.detach()
-                # if "act1" in name:
-                #     print("w (learnt):", name, torch.sum(w))
                 binary_w = (w > 0.5).float()
                 residual = w - binary_w
                 branch_out = module.weight - residual
@@ -147,7 +145,6 @@ def apply_pas_loss(model, prune_ratio=0.0, pas_coeff=5, arch="resnets"):
                 # skipping relu before maxpooling
                 if name != "act1":
                 # if name != "act1.binary_conv":
-                    # print(name)
                     in_chs_list = torch.cat((in_chs_list, torch.sum(torch.squeeze(branch_out), dim=0, keepdim=True)), dim=0)
 
         # add input channel 3

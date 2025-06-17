@@ -87,20 +87,21 @@ parser.add_argument('-c', '--config', default='', type=str, metavar='FILE',
 # basic
 img_size = 160 # 160
 img_size_eval = 224
-batch_size = 128
+batch_size = 256 # 128
 net_arch = "resnet50"
-model_path = "/home/zzq/Documents/apps/image_cls/pytorch-image-models/trained_models/resnet50_A3/20250423-063501-resnet50-160/model_best.pth.tar"
+# model_path = "/home/zzq/Documents/apps/image_cls/pytorch-image-models/trained_models/resnet50_A3/20250423-063501-resnet50-160/model_best.pth.tar"
+model_path = "/home/zzq/Documents/apps/optimization/pruning/PaS_Timm/save_dir/resnet50_A3_search_lr_0.0005_eps_50_bs_128_p0.55_scale_1e3_fp32/20250617-060241-resnet50-160/last.pth.tar"
 
-search_lr = 5e-4 # 5e-3 # 0.008
+search_lr = 5e-4 # 0.008 # 5e-4 # 5e-3 # 0.008
 prune_ratio = 0.55
 warmup_epochs = 0
-epochs = 50
+epochs = 50 # 50
 pas_record = True
-freeze_binary = False
+freeze_binary = True
 
 # 0.008: 5e-5
 
-save_dir = f"save_dir/resnet50_A3_search_lr_{search_lr}_eps_{epochs}_bs_{batch_size}_p{prune_ratio}_scale_1e3_fp32"
+save_dir = f"save_dir/resnet50_A3_finetune_lr_{search_lr}_eps_{epochs}_bs_{batch_size}_p{prune_ratio}_scale_1e3_fp32"
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 
@@ -942,9 +943,11 @@ def main():
         ####### freeze binary dw weights #######
         if freeze_binary:
             for name, params in model.named_parameters():
-                if 'scale' in name:
+                if "act" in name or "maxpool" in name:
                     params.requires_grad = False
-                    print('epoch and freezed params: ', name)
+                    print('\033[94mfreezed params: {}\033[0m'.format(name))
+                else:
+                    print(name)
 
         if pas_record:
             converge = Convergence(model)

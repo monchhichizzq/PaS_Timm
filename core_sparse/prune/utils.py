@@ -12,6 +12,7 @@ class Convergence(object):
                 w = module.weight.detach().cpu()
                 binary_w = (w > 0.5).float()
                 self.channels = torch.cat((self.channels, torch.sum(torch.squeeze(binary_w), dim=0, keepdim=True)), dim=0)
+                # print(name, torch.sum(torch.squeeze(binary_w)))
         self.channels = self.channels.reshape(1, self.channels.size(0))
         print("self.channels: ", self.channels.shape) # (1, 49)
 
