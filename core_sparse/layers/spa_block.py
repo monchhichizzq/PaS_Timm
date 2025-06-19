@@ -110,3 +110,26 @@ class SparseBatchNorm2d(Input_Placeholder, nn.BatchNorm2d):
         
         return x
 
+
+
+class SparseMaxPool(Input_Placeholder):
+    """
+    Sparse linear layer that applies a threshold to the input tensor.
+    """
+    def __init__(self, layer, threshold, inplace, position="after"):
+        Input_Placeholder.__init__(self, thresh=threshold, inplace=inplace)
+        self.layer = layer
+        self.position = position
+
+    def forward(self, x):
+        if self.position == "before":
+            # Apply thresholding to the input tensor
+            x = Input_Placeholder.forward(self, x)
+            
+        # Perform linear transformation
+        x = self.layer(x)
+
+        if self.position == "after":
+            # Apply thresholding to the input tensor
+            x = Input_Placeholder.forward(self, x)  
+        return x

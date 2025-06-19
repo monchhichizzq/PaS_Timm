@@ -3,7 +3,8 @@ import torch.nn as nn
 import numpy as np
 from core_sparse.layers.spa_layer import Input_Placeholder
 from core_sparse.layers.spa_block import SparseConv2d
-from core_sparse.layers.prune_layer import BinaryConv2d
+from core_sparse.layers.prune_staic_layer import BinaryConv2d
+from core_sparse.layers.prune_dynamic_layer import BinaryAttention
 
 
 def induce_sparsity(x, star_coeff=0.0, thresh=-23, loss_mode='l1'):
@@ -143,9 +144,100 @@ def apply_pas_loss(model, prune_ratio=0.0, pas_coeff=5, arch="resnets"):
                 branch_out = module.weight - residual
 
                 # skipping relu before maxpooling
-                if name != "act1":
+                # if name != "act1":
                 # if name != "act1.binary_conv":
-                    in_chs_list = torch.cat((in_chs_list, torch.sum(torch.squeeze(branch_out), dim=0, keepdim=True)), dim=0)
+                in_chs_list = torch.cat((in_chs_list, torch.sum(torch.squeeze(branch_out), dim=0, keepdim=True)), dim=0)
+
+        # add input channel 3
+        ou_chs_list = in_chs_list
+        in_chs_list = torch.cat((torch.tensor([3]).cuda(), in_chs_list[:-1]), dim=0)
+
+        total_prune_macs = torch.sum(torch.tensor(in_chs_list) * torch.tensor(layer_mac_list).cuda() * ou_chs_list)
+
+    else:
+        raise NotImplementedError(f"Architecture {arch} is not implemented.")
+
+    criterion = nn.MSELoss()
+    total_dense_macs = total_dense_macs / 1e9
+    target_macs = total_dense_macs * (1 - prune_ratio)
+    target_macs = torch.tensor(target_macs, dtype=torch.float32).cuda()
+    total_prune_macs = total_prune_macs / 1e9
+    prune_loss = criterion(total_prune_macs, target_macs)
+    pas_loss = pas_coeff * prune_loss
+    # print(total_prune_macs, target_macs, pas_loss, prune_ratio)
+    # print("")
+    return pas_loss, total_dense_macs, total_prune_macs, target_macs
+
+
+
+def apply_dyn_pas_loss(model, prune_ratio=0.0, pas_coeff=5, arch="resnets"):
+    """
+    Apply PaS loss to the model.
+    Args:
+        model: The model to apply PaS loss.
+        prune_ratio: The ratio of channels to prune.
+        pas_coeff: The coefficient for PaS loss.
+        arch: The architecture of the model.
+    Returns:
+        The PaS loss value.
+    """
+
+    total_dense_macs = 0
+    if arch == "resnets":
+        layer_mac_dict = {}
+        layer_mac_list = []
+        for name, module in model.named_modules():
+            if isinstance(module, SparseConv2d): # notice input size
+                feature_shape = module.input_shape
+                sigma_evts = module.sigma_events
+                spati_evts = module.spati_events
+                dense_evts = module.dense_events
+                in_feat = module.sig_x # batch, in_chs, h, w
+
+                c_out, c_in, k_h, k_w, s, g, params = get_conv_params(module)
+                _, h_in, w_in = module.input_shape
+         
+                c_out, h_out, w_out = c_out, h_in // s, w_in // s
+                
+                if g != 1:
+                    dense_macs = h_out * w_out * c_out * c_in * k_h * k_w / g
+                else:
+                    dense_macs = h_out * w_out * c_out * c_in * k_h * k_w
+
+                if g != 1:
+                    dense_params = h_out * w_out * k_h * k_w / g
+                else:
+                    dense_params = h_out * w_out * k_h * k_w
+                
+                axis_ = 0 if in_feat.dim() < 4 else [0, 2, 3]
+
+                if len(in_feat.shape) < 4:
+                    in_chs = torch.sum(in_feat, dim=axis_)
+                else:
+                    in_chs = torch.sum(in_feat, dim=axis_)
+
+                binary_chs = (in_chs > 0.0).float()
+                c_in_act = torch.sum(binary_chs)
+  
+                # if isinstance(c_in_act, torch.Tensor):
+                #     c_in_act = c_in_act.cpu().numpy()
+
+                total_dense_macs += dense_macs
+ 
+                # important
+                if "downsample" not in name:
+                    layer_mac_dict[name] = dense_params
+                    layer_mac_list.append(float(dense_params))
+          
+        in_chs_list = torch.tensor([]).cuda()
+
+        for name, module in model.named_modules():
+            if isinstance(module, BinaryAttention):
+                att_mask = module.att_mask
+                act_chs = torch.round(torch.mean(torch.sum(att_mask, dim=1, keepdim=True)))
+                act_chs = torch.unsqueeze(act_chs, axis=0)
+                # in_chs_list = torch.cat((in_chs_list, torch.sum(torch.squeeze(att_mask), dim=0, keepdim=True)), dim=0)
+                in_chs_list = torch.cat((in_chs_list, act_chs), dim=0)
 
         # add input channel 3
         ou_chs_list = in_chs_list

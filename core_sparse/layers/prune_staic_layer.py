@@ -12,7 +12,7 @@ class Check_G(Function):
         
     @staticmethod
     def backward(ctx, grad_output):
-        grad_output = grad_output * 1e3 # search scale
+        grad_output = grad_output * 1e2 # search scale
         # print("grad_output:", torch.min(grad_output), torch.max(grad_output))
         return grad_output      
 

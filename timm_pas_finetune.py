@@ -90,12 +90,17 @@ img_size_eval = 224
 batch_size = 256 # 128
 net_arch = "resnet50"
 # model_path = "/home/zzq/Documents/apps/image_cls/pytorch-image-models/trained_models/resnet50_A3/20250423-063501-resnet50-160/model_best.pth.tar"
-model_path = "/home/zzq/Documents/apps/optimization/pruning/PaS_Timm/save_dir/resnet50_A3_search_lr_0.0005_eps_50_bs_128_p0.55_scale_1e3_fp32/20250617-060241-resnet50-160/last.pth.tar"
+# model_path = "/home/zzq/Documents/apps/optimization/pruning/PaS_Timm/save_dir/resnet50_A3_search_lr_0.0005_eps_50_bs_128_p0.55_scale_1e3_fp32/20250617-060241-resnet50-160/last.pth.tar"
+# model_path = "/home/zzq/Documents/apps/optimization/pruning/PaS_Timm/save_dir/resnet50_A3_search_lr_0.0005_eps_50_bs_128_p0.55_scale_1e3_fp32/20250617-060241-resnet50-160/checkpoint-10.pth.tar"
+# model_path = "/home/zzq/Documents/apps/optimization/pruning/PaS_Timm/save_dir/resnet50_A3_search_lr_0.0005_eps_50_bs_128_p0.55_scale_1e3_fp32/20250617-060241-resnet50-160/checkpoint-11.pth.tar"
 
-search_lr = 5e-4 # 0.008 # 5e-4 # 5e-3 # 0.008
+model_path = "/home/zzq/Documents/apps/optimization/pruning/PaS_Timm/save_dir/resnet50_A3_search_lr_0.0005_eps_50_bs_128_p0.55_scale_1e2_fp32/20250619-013227-resnet50-160/checkpoint-14.pth.tar"
+print(model_path)
+
+search_lr = 0.008 # 5e-4 # 0.008 # 5e-4 # 5e-3 # 0.008
 prune_ratio = 0.55
 warmup_epochs = 0
-epochs = 50 # 50
+epochs = 100 # 50 # 50
 pas_record = True
 freeze_binary = True
 
@@ -1134,6 +1139,10 @@ def train_one_epoch(
     data_start_time = update_start_time = time.time()
     optimizer.zero_grad()
     update_sample_count = 0
+
+    ## speed up
+    pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+
     for batch_idx, (input, target) in enumerate(loader):
         last_batch = batch_idx == last_batch_idx
         need_update = last_batch or (batch_idx + 1) % accum_steps == 0
@@ -1186,13 +1195,13 @@ def train_one_epoch(
                 task_loss = _forward()
                 #### pas_change
                 # apply_opt_loss(model, star_coeff=0, pas_coeff=0, loss_mode="l1")
-                pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
-                loss = task_loss + pas_loss
+                # pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+                loss = task_loss # + pas_loss
                 _backward(loss)
         else:
             task_loss = _forward()
-            pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
-            loss = task_loss + pas_loss
+            # pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+            loss = task_loss # + pas_loss
             _backward(loss)
 
         #### pas_change

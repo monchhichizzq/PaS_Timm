@@ -1,5 +1,5 @@
 import torch
-from core_sparse.layers.prune_layer import BinaryConv2d
+from core_sparse.layers.prune_staic_layer import BinaryConv2d
 
 class Convergence(object):
     """Computes and stores the average and current value"""

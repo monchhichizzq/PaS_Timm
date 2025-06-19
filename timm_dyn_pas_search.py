@@ -66,10 +66,10 @@ except ImportError as e:
     has_functorch = False
 
 
-from core_sparse.rebuild_net import insert_pas_modules 
+from core_sparse.rebuild_net import insert_dyn_pas_modules 
 from core_sparse.metrics.compute_metric_v2 import measure_network_compute, create_layer_metric_dict
 from core_sparse.prune.utils import Convergence
-from core_sparse.losses.pas_loss import apply_opt_loss, apply_pas_loss
+from core_sparse.losses.pas_loss import apply_opt_loss, apply_dyn_pas_loss
 
 has_compile = hasattr(torch, 'compile')
 
@@ -102,7 +102,7 @@ freeze_binary = False
 
 # 0.008: 5e-5
 
-save_dir = f"save_dir/resnet50_A3_search_lr_{search_lr}_eps_{epochs}_bs_{batch_size}_p{prune_ratio}_scale_1e2_fp32"
+save_dir = f"save_dir/dyn_pruning/resnet50_A3_search_lr_{search_lr}_eps_{epochs}_bs_{batch_size}_p{prune_ratio}_fp32"
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 
@@ -539,7 +539,7 @@ def main():
 
     # Important: add trainable parameters before building optimizer!!
     if args.insert_pas:
-        insert_pas_modules(model, inplace=False)
+        insert_dyn_pas_modules(model, inplace=False)
         model.cuda()
         model.eval()
         tensor = torch.rand(8, 3, img_size_eval, img_size_eval).cuda()
@@ -1069,7 +1069,7 @@ def main():
             # os.makedirs(output_dir, exist_ok=True)
 
             ######### PaS ##########
-            pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+            pas_loss, dense_macs, prune_macs, target_macs = apply_dyn_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
             converge_path = os.path.join(output_dir, f"ep_{epoch}_convergence_{prune_ratio}_pmacs_{prune_macs}_tmacs_{target_macs}.pt")
             converge.save(converge_path)
             print(f"converge_path: {converge_path}")
@@ -1187,13 +1187,13 @@ def train_one_epoch(
                 task_loss = _forward()
                 ######### PaS ##########
                 # apply_opt_loss(model, star_coeff=0, pas_coeff=0, loss_mode="l1")
-                pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+                pas_loss, dense_macs, prune_macs, target_macs = apply_dyn_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
                 loss = task_loss + pas_loss
                 _backward(loss)
         else:
             task_loss = _forward()
             ######### PaS ##########
-            pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+            pas_loss, dense_macs, prune_macs, target_macs = apply_dyn_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
             loss = task_loss + pas_loss
             _backward(loss)
 
@@ -1352,7 +1352,7 @@ def validate(
                     f'Acc@5: {top5_m.val:>7.3f} ({top5_m.avg:>7.3f})'
                 )
                 ######### PaS ##########
-                pas_loss, dense_macs, prune_macs, target_macs = apply_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
+                pas_loss, dense_macs, prune_macs, target_macs = apply_dyn_pas_loss(model, prune_ratio=prune_ratio, pas_coeff=5, arch="resnets")
                 print("total macs: {:.3f}G, pruned macs: {:.3f}G, target macs: {:.3f}G, pas_loss: {:.3f}".format(
                     dense_macs, prune_macs, target_macs, pas_loss
                 ))

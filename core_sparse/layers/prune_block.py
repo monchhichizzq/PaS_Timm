@@ -2,7 +2,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from core_sparse.layers.spa_layer import Input_Threshold
-from core_sparse.layers.prune_layer import BinaryConv2d
+from core_sparse.layers.prune_staic_layer import BinaryConv2d
+from core_sparse.layers.prune_dynamic_layer import BinaryAttention
+
+
 
 class PaSAct(BinaryConv2d, Input_Threshold):
     def __init__(self, act_layer, in_chs):
@@ -26,6 +29,33 @@ class PaSAct(BinaryConv2d, Input_Threshold):
         # Apply thresholding to the input tensor
         x = Input_Threshold.forward(self, x)
         return x
+
+
+class DPaSAct(BinaryAttention, Input_Threshold):
+    def __init__(self, act_layer, in_chs):
+        Input_Threshold.__init__(self, thresh=-25)
+        BinaryAttention.__init__(self, 
+                            in_channels=in_chs, 
+                            out_channels=in_chs,
+                            )
+        self.act_layer = act_layer
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    def forward(self, x):
+        # Apply activation function
+        x = self.act_layer(x)
+
+        # Apply binary to the input tensor
+        att_mask = BinaryAttention.forward(self, x)
+        x = x * att_mask
+
+        # Apply thresholding to the input tensor
+        # x = Input_Threshold.forward(self, x)
+        return x
+
+
+
+
 
 
 # backup
